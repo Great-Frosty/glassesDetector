@@ -18,14 +18,12 @@ from torch.utils.data import Dataset, DataLoader
 import torch.optim
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from facenet_pytorch import MTCNN
 import numpy as np
+import torchvision.models as models
 
 
-start_time = time.time()
 img_dir = sys.argv[-1]
 
-mtcnn = MTCNN(128, margin=8)
 class GlassesDataset(Dataset):
     def __init__(self, images_filepaths, transform=None):
         self.images_filepaths = images_filepaths
@@ -45,63 +43,48 @@ class GlassesDataset(Dataset):
         return image
 
 
-class ConvModel(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
+# class ConvModel2(nn.Module):
+#     def __init__(self) -> None:
+#         super().__init__()
 
-        self.layer = nn.Sequential(
-            nn.Conv2d(3, 32, 3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.2),
-            nn.MaxPool2d(2), # 112*112
-            nn.Conv2d(32, 32, 3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.1),
-            nn.Conv2d(32, 32, 3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.1),
-            nn.MaxPool2d(2), # 66 * 66
-            nn.Conv2d(32, 64, 3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.1),
-            nn.MaxPool2d(2), # 33 * 33
-            nn.Conv2d(64, 64, 3, padding=1, stride=1),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.05),
-            nn.Conv2d(64,128,3, padding=1, stride=1),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.05),
-            nn.MaxPool2d(2), # 16 * 16
-            nn.Conv2d(128, 128, 3, padding=1, stride=1),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.05),
-            nn.MaxPool2d(2), # 8*8
-            nn.Conv2d(128, 256, 3, padding=1, stride=1),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.02),
-            nn.Conv2d(256, 256, 3, padding=1, stride=1),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.02),
-            nn.MaxPool2d(2), # 4*4
-            nn.Conv2d(256,512, 3, padding=1, stride=1),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.01),
-            nn.AdaptiveMaxPool2d(2), # 2*2
-        )
-        self.classifier = nn.Sequential(
-            # nn.Dropout(p=0.2),
-            nn.Linear(4*512, 1),
-        )
+    #     self.layer = nn.Sequential(
+    #         nn.Conv2d(3,12,3, padding=1, stride=1),
+    #         nn.BatchNorm2d(12),
+    #         nn.ReLU(),
+    #         nn.MaxPool2d(4, stride=4), # 66
+    #         nn.Conv2d(12,24,3, padding=1, stride=1),
+    #         nn.BatchNorm2d(24),
+    #         nn.ReLU(),
+    #         nn.MaxPool2d(4, stride=4), # 33
+    #         nn.Conv2d(24,48,3, padding=1, stride=1),
+    #         nn.BatchNorm2d(48),
+    #         nn.ReLU(),
+    #         nn.MaxPool2d(2), # 16
+    #         nn.Conv2d(48,96,3, padding=1, stride=1),
+    #         nn.BatchNorm2d(96),
+    #         nn.ReLU(),
+    #         nn.AdaptiveMaxPool2d(4),
+    #     )
 
-    def forward(self, images):
-        x = self.layer(images)
-        x = x.view(-1, 4*512)
-        x = self.classifier(x)
-        return x
+    #     self.classifier = nn.Sequential(
+    #         nn.Linear(4**2*96, 1)
+    #     )
+
+    # def forward(self, images):
+    #     x = self.layer(images)
+    #     x = x.view(-1, 4**2*96)
+    #     x = self.classifier(x)
+    #     return x
 
 
-model = ConvModel()
-model_path = os.path.join(os.getcwd(), 'trained_model/conv_net_weights.pt')
+model = getattr(models, 'mobilenet_v3_small')(pretrained=False)
+model.classifier = nn.Sequential(
+    nn.Linear(in_features=576, out_features=1024, bias=True),
+    nn.Hardswish(),
+    nn.Dropout(p=0.2, inplace=True),
+    nn.Linear(in_features=1024, out_features=1, bias=True),
+)
+model_path = os.path.join(os.getcwd(), 'trained_model/transfer_weights.pt')
 model = model.eval()
 model.load_state_dict(torch.load(model_path))
 
@@ -127,13 +110,16 @@ def calculate_accuracy(predictions, target):
     return torch.true_divide((target == predictions).sum(dim=0), output.size(0)).item()
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device = torch.device('cpu')
+model.to(device, non_blocking=True)
+# device = torch.device('cpu')
+start_time = time.time()
 
 predicted_paths = []
 with torch.no_grad():
     for images in image_loader:
         if device.type == 'cuda':
             images = images.to(device, non_blocking=True)
+            target = target.to(device, non_blocking=True)
         output = model(images)
         predictions = (torch.sigmoid(output) >= 0.5)[:, 0]
         predicted_paths += [images_paths[i] for i, gls_detected in enumerate(predictions) if gls_detected]
